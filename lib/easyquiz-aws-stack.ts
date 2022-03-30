@@ -1,8 +1,11 @@
-import { Stack, StackProps } from 'aws-cdk-lib';
+import { Duration, Stack, StackProps } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import * as ec2 from "aws-cdk-lib/aws-ec2";
 import * as ecs from "aws-cdk-lib/aws-ecs";
 import * as ecs_patterns from "aws-cdk-lib/aws-ecs-patterns";
+import * as aws_route53 from "aws-cdk-lib/aws-route53";
+import * as aws_certificatemanager from "aws-cdk-lib/aws-certificatemanager";
+import * as aws_route53_targets from "aws-cdk-lib/aws-route53-targets";
 import * as dotenv from 'dotenv'
 dotenv.config()
 export class EasyquizAwsStack extends Stack {
@@ -27,8 +30,18 @@ export class EasyquizAwsStack extends Stack {
       vpc: vpc,
     });
 
+    const hostedZone = aws_route53.HostedZone.fromLookup(this, 'EasyQuizHostedZone', {
+      domainName: 'easyquiz.click'
+    });
+
+    const certificate = new aws_certificatemanager.Certificate(this, 'EasyQuizCertificate', {
+      domainName: '*.easyquiz.click',
+      validation: aws_certificatemanager.CertificateValidation.fromDns(hostedZone)
+    });
+
     // Create a load-balanced Fargate service and make it public
-    const lb = new ecs_patterns.ApplicationLoadBalancedFargateService(this, "EasyQuizFargateService", {
+    const service = new ecs_patterns.ApplicationLoadBalancedFargateService(this, "EasyQuizFargateService", {
+      certificate,
       cluster: cluster,
       desiredCount: 2,
       taskImageOptions: { 
@@ -57,6 +70,13 @@ export class EasyquizAwsStack extends Stack {
       publicLoadBalancer: true,
     });
 
+    new aws_route53.ARecord(this, 'EasyQuizDnsRecord', {
+      recordName: 'api',
+      zone: hostedZone,
+      target: aws_route53.RecordTarget.fromAlias(new aws_route53_targets.LoadBalancerTarget(service.loadBalancer)),
+      ttl: Duration.minutes(1)
+    });
+
     const importedSecurityGroup = ec2.SecurityGroup.fromSecurityGroupId(
       this,
       'database-security-group',
@@ -64,9 +84,9 @@ export class EasyquizAwsStack extends Stack {
       { allowAllOutbound: false }
     );
 
-    lb.service.connections.allowTo(importedSecurityGroup,  ec2.Port.tcp(parseInt(DB_PORT || '')))
+    service.service.connections.allowTo(importedSecurityGroup,  ec2.Port.tcp(parseInt(DB_PORT || '')))
 
-    lb.targetGroup.configureHealthCheck({
+    service.targetGroup.configureHealthCheck({
       path: "/check",
       enabled: true,
       healthyHttpCodes: '200'
